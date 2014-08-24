@@ -1,3 +1,11 @@
+/*
+This file holds code for benchmarking latencies and throughput for a prototype of 'n' processes
+performing performing one to one writes across 2 scif nodes via the scif_interface. The sending
+processes write data to the appropriate offset of the target process on the registered memory on
+the receiver daemon on the target node. Each process measures its transfer latency and throughput.
+Will act as sender when launched with OP_type parameter as 'w' and receiver when launched with 'r'.
+*/
+
 using namespace std;
 #include <iostream>
 #include <omp.h>
@@ -12,13 +20,12 @@ using namespace std;
 #include <sys/wait.h>
 #include <sys/mman.h>
 
-#define SRC_REG_OFFSET 0x100000;
-#define STOP_OFFSET 0x81000;
-#define TGT_REG_OFFSET 0x100000000;
+#define SRC_REG_OFFSET 0x100000;  //Registered offset of src_buf on the sender
+#define STOP_OFFSET 0x81000;  //Registered offset for the stop indicator
+#define TGT_REG_OFFSET 0x100000000;  //Registered offset for recv_space on the receiver daemon.
 #define RECV_BUF_SIZE_MB 32;  //size of receive buffer for each proc in MB
 
 int proc_set_affinity(int proc_num, pid_t pid);
-void proc_get_affinity(int proc_num, pid_t pid, int NUM_PROCS);
 void check_errno(int err_no);
 
 int main (int argc, char* argv[])
@@ -27,8 +34,6 @@ int main (int argc, char* argv[])
   int ret;
   int pagesize = sysconf(_SC_PAGESIZE);
   char file_path[40] = "/home/prabhashankar/work/";  //default file path
-//int TOT_NUM_PROCS = sysconf(_SC_NPROCESSORS_CONF);
-//cout<<"Total available processors :"<<TOT_NUM_PROCS<<endl;
   if (argc < 7) {
     cerr<<"Format ./lauch_benchmark.out <NUM_PROCS> <msg_size> <target_node> <OP_type(w/r)> <iterations> <rma_type(m=scif_mmap/a=scif_writeto/v=scif_vwriteto)> <file_path(optional)>\n";
     return 1;
@@ -74,7 +79,6 @@ int main (int argc, char* argv[])
   //fn to set affinity for each process
   if (proc_set_affinity(proc_num+1, pid) == -1)  //Setting affinity
     return 1;
-  //proc_get_affinity(proc_num,pid,NUM_PROCS);  //Check affinity
   //"proc_num"s > 0 are used as senders
   if (proc_num > 0) {
     int tries;
@@ -216,32 +220,27 @@ int main (int argc, char* argv[])
     }
     double begin_time_tx = timerval(); //Register start of transfer time
     switch(OPtype) {
-      //if sending process then perform transfer "iter" number of times
+      //if sending process then perform transfer "iter" number of times. 'k'th process on sender
+      //writes to 'n-k'th process on the receiver
       case 'w':switch (rma_type) {
       	  	     case 'm':for (int i = 1 ; i <= iter ; i++) {
-      	  	    	 	  //for (int j = 1 ; j <= NUM_PROCS ; j++) {
       	  	    	 	  memcpy(src_mapped_buf + (NUM_PROCS - proc_num) * recv_buf_size_bytes / sizeof(double), src_buf, NO_VALS * sizeof(double));
-      	  	    	 	  //}
       	  	     	 	  }
       	  	     	 	  break;
       	  	     case 'a':for (int i = 1 ; i <= iter ; i++) {
-      	  	    	 	  //for (int j = 1 ; j <= NUM_PROCS ; j++) {
       	  	    	 	    if(scif_writeto(ep_send_ext, src_reg_offset, sizeof(double) * NO_VALS, tgt_reg_offset + (NUM_PROCS - proc_num) * recv_buf_size_bytes, SCIF_RMA_SYNC) < 0) {
       	  	    	 		  cerr<<"Node :"<<self<<" Proc :"<<proc_num<<" Error while writing :"<<errno<<endl;
       	  	    	 		  check_errno(errno);
       	  	    	 		  return 1;
       	  	    	 	    }
-      	  	    	 	  //}
       	  	     	 	  }
       	  	     	 	  break;
       	  	     case 'v':for (int i = 1 ; i <= iter ; i++) {
-      	  	    	 	  //for (int j = 1 ; j <= NUM_PROCS ; j++) {
       	  	    	 	    if(scif_vwriteto(ep_send_ext, (void*)src_buf, sizeof(double) * NO_VALS, tgt_reg_offset + (NUM_PROCS - proc_num) * recv_buf_size_bytes, SCIF_RMA_SYNC) < 0) {
       	  	    	 	      cerr<<"Node :"<<self<<" Proc :"<<proc_num<<" Error while writing :"<<errno<<endl;
       	  	    	 	      check_errno(errno);
       	  	    	 	      return 1;
       	  	    	 	    }
-      	  	    	 	  //}
       	  	     	 	  }
       	  	     	 	  break;
         	   }
@@ -253,6 +252,7 @@ int main (int argc, char* argv[])
       default:cerr<<"Invalid OP_type-->w/r\n"; return 1;
     }
     double end_time_tx = timerval(); //Register end of transfer
+    //Code block to check written data...un-comment block to print
 /*
     if (OPtype == 'r') {
       cout<<"Node :"<<self<<" Proc "<<proc_num<<" Received vals :";
@@ -322,11 +322,6 @@ int main (int argc, char* argv[])
       //Calculating throughput in MBps
       double throughput=double(NO_VALS * sizeof(double) * 1000000) / ((latency_tx) * double(1024 * 1024));
       cout<<"Node :"<<self<<" Proc :"<<proc_num<<" Initialization Latency, Transfer Latency, Throughput : "<<latency_init<<" us, "<<latency_tx<<" us, "<<throughput<<" MBps"<<endl;
-/*
-      cout<<"Node :"<<self<<" Proc :"<<proc_num<<" Initialization Latency : "<<latency_init<<" us"<<endl;
-      cout<<"Node :"<<self<<" Proc :"<<proc_num<<" Transfer Latency : "<<latency_tx<<" us"<<endl;
-      cout<<"Node :"<<self<<" Proc :"<<proc_num<<" Throughput : "<<throughput<<" MBps"<<endl;
-*/
     }
     scif_close(ep_send);
     if (pid != 0) {
@@ -334,16 +329,9 @@ int main (int argc, char* argv[])
         wait(NULL);
       }
     }
-/*
-    free(src_mapped_buf);
-    cerr<<"Node :"<<self<<" Proc :"<<proc_num<<" Delete 1...\n";
     free(src_buf);
-    cerr<<"Node :"<<self<<" Proc :"<<proc_num<<" Delete 2...\n";
-    delete stop;
-    cerr<<"Node :"<<self<<" Proc :"<<proc_num<<" Delete 3...\n";
-*/
   }
-  //If proc_num is 0, launch local receiver daemon
+  //proc_num = 0 is used as receiver daemon
   if (proc_num == 0) {
     double *recv_space;  //pointer to total receiver space for all procs
     int ret = posix_memalign((void**) &recv_space, pagesize, recv_space_bytes);
@@ -388,14 +376,14 @@ int main (int argc, char* argv[])
     errno = 0;
     //Binding end point to port
     if (scif_bind(ep_listen_IPC, portid_listen_IPC.port) < 0) {
-      cerr<<"Node :"<<self<<" Receiver : End point bind failed\n";
+      cerr<<"Node :"<<self<<" Receiver : End point bind failed for IPC\n";
       check_errno(errno);
       exit(1);
     }
     errno = 0;
     //Binding end point to port
     if (scif_bind(ep_listen_ext, portid_listen_ext.port) < 0) {
-      cerr<<"Node :"<<self<<" Receiver : End point bind failed\n";
+      cerr<<"Node :"<<self<<" Receiver : End point bind failed for ext\n";
       check_errno(errno);
       exit(1);
     }
@@ -490,21 +478,37 @@ int main (int argc, char* argv[])
     scif_close(ep_listen_IPC);
     return 0;
   }
-  //proc_num is -1 used to launch the receiving procs on the remote node
+  //proc_num = -1 used to launch the receiving procs on the remote node
   if (proc_num == -1) {
     char recv_hostname[5];
     char target_string[2];
-    char app_file_path[60];
+    char app_file_path_host[60];
+    char app_file_path_mic[60];
     sprintf(target_string, "%d", self);
-    sprintf(app_file_path, "%sscif_rcv_procs.out", file_path);
+    sprintf(app_file_path_host, "%s/scif_rcv_procs_host.out", file_path);
+    sprintf(app_file_path_mic, "%s/scif_rcv_procs_mic.out", file_path);
     switch (recv_node) {
       case 0: strcpy(recv_hostname,"host"); break;
       case 1: strcpy(recv_hostname,"mic0"); break;
+      case 2: strcpy(recv_hostname,"mic1"); break;
+      case 3: strcpy(recv_hostname,"mic2"); break;
+      case 4: strcpy(recv_hostname,"mic3"); break;
       default: cerr<<"Unable to resolve receiver host node\n"; return 1;
     }
-    //
-    char* eargs[] = {"ssh", recv_hostname, app_file_path, argv[1], argv[2], target_string, "r", argv[5], argv[6], NULL};
-    execvp("/usr/bin/ssh",eargs);
+    if (self == 0) {
+      char* eargs[] = {"ssh", recv_hostname, app_file_path_mic, argv[1], argv[2], target_string, "r", argv[5], argv[6], NULL};
+      execvp("/usr/bin/ssh",eargs);
+    }
+    else {
+    	if(strcmp(recv_hostname, "host") == 0) {
+    	  char* eargs[] = {"ssh", recv_hostname, app_file_path_host, argv[1], argv[2], target_string, "r", argv[5], argv[6], NULL};
+    	  execvp("/usr/bin/ssh",eargs);
+    	}
+        else {
+          char* eargs[] = {"ssh", "host", "ssh", recv_hostname, app_file_path_mic, argv[1], argv[2], target_string, "r", argv[5], argv[6], NULL};
+          execvp("/usr/bin/ssh",eargs);
+        }
+    }
     _exit(0);
   }
   munmap(stop_array, sizeof(int) * NUM_PROCS);
@@ -551,14 +555,4 @@ int proc_set_affinity(int proc_num, pid_t pid) {
     return -1;
   }
   return 0;
-}
-
-void proc_get_affinity(int proc_num, pid_t pid, int NUM_PROCS) {
-  cpu_set_t mycpuid;
-  sched_getaffinity(pid, sizeof(mycpuid), &mycpuid);
-  for (int cpu_num = 1 ; cpu_num <= NUM_PROCS ; cpu_num++) {
-    if (CPU_ISSET(cpu_num, &mycpuid)) {
-      cout<<"Affinity set for proc "<<proc_num<<" :"<<cpu_num<<endl;
-    }
-  }
 }

@@ -1,11 +1,6 @@
-/*
- * timer.cpp
- *
- *  Created on: 13-Jun-2014
- *      Author: sony
+/*This file contains the declaration of the function timerval() that is used in the benchmarks to
+ *register time
  */
-
-//#include "timer.h"
 #include <sys/time.h>
 
 double timerval () {
